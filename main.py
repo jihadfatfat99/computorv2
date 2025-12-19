@@ -19,11 +19,12 @@ Usage:
 
 import sys
 import signal
+import os
 
 try:
     import readline  # Enable arrow keys and history in input
 except ImportError:
-    pass  # readline not available on all platforms
+    readline = None  # readline not available on all platforms
 
 from src.lexer import LexerError
 from src.parser import parse, ParserError
@@ -63,6 +64,11 @@ def colorize(text: str, color: str) -> str:
     return text
 
 
+# History file path
+HISTORY_FILE = os.path.expanduser("~/.computorv2_history")
+MAX_HISTORY_SIZE = 1000
+
+
 class Computor:
     """
     Main Computorv2 interpreter class.
@@ -75,25 +81,60 @@ class Computor:
         self.evaluator = Evaluator(self.context)
         self.running = True
         self.history = []
+        self.results = {}  # Store results keyed by command
+        self._load_history()
+    
+    def _load_history(self):
+        """Load command history from file."""
+        try:
+            if os.path.exists(HISTORY_FILE):
+                with open(HISTORY_FILE, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            self.history.append(line)
+                            # Also add to readline history if available
+                            if readline:
+                                try:
+                                    readline.add_history(line)
+                                except:
+                                    pass
+        except Exception:
+            pass  # Ignore errors loading history
+    
+    def _save_history(self):
+        """Save command history to file."""
+        try:
+            # Keep only last MAX_HISTORY_SIZE entries
+            history_to_save = self.history[-MAX_HISTORY_SIZE:]
+            with open(HISTORY_FILE, 'w') as f:
+                for cmd in history_to_save:
+                    f.write(cmd + '\n')
+        except Exception:
+            pass  # Ignore errors saving history
     
     def run(self):
         """Run the interactive REPL."""
         self.print_banner()
         
-        while self.running:
-            try:
-                line = input(colorize("> ", Colors.GREEN)).strip()
-                
-                if not line:
-                    continue
-                
-                self.history.append(line)
-                self.process(line)
-                
-            except EOFError:
-                # Ctrl+D
-                print("\nGoodbye!")
-                self.running = False
+        try:
+            while self.running:
+                try:
+                    line = input(colorize("> ", Colors.GREEN)).strip()
+                    
+                    if not line:
+                        continue
+                    
+                    self.history.append(line)
+                    self.process(line)
+                    
+                except EOFError:
+                    # Ctrl+D
+                    print("\nGoodbye!")
+                    self.running = False
+        finally:
+            # Always save history on exit
+            self._save_history()
     
     def process(self, line: str):
         """Process a single input line."""
@@ -169,7 +210,8 @@ class Computor:
             print("Context cleared.")
         
         elif command == 'history':
-            self.show_history()
+            show_all = len(args) > 0 and args[0].lower() == 'all'
+            self.show_history(show_all)
         
         elif command in ('del', 'delete'):
             if args:
@@ -177,12 +219,23 @@ class Computor:
             else:
                 print("Usage: !del <name>")
         
+        elif command == 'all':
+            self.list_all()
+        
         else:
             self.print_error(f"Unknown command: {command}")
             print("Type !help for available commands.")
     
+    def list_all(self):
+        """List all variables, functions, and builtins."""
+        self.list_variables()
+        print()
+        self.list_functions()
+        print()
+        self.list_builtins()
+    
     def list_variables(self):
-        """List all defined variables."""
+        """List all defined variables with their types."""
         variables = self.context.list_variables()
         if not variables:
             print("No variables defined.")
@@ -190,10 +243,20 @@ class Computor:
         
         print(colorize("Variables:", Colors.BOLD))
         for name, value in variables:
-            print(f"  {name} = {format_value(value)}")
+            type_info = self._get_type_info(value)
+            formatted = format_value(value)
+            # Handle multi-line values (like matrices)
+            if '\n' in formatted:
+                # Multi-line value (matrix) - show on multiple lines
+                lines = formatted.split('\n')
+                print(f"  {name} = {lines[0]}  {colorize(f'({type_info})', Colors.YELLOW)}")
+                for line in lines[1:]:
+                    print(f"        {line}")
+            else:
+                print(f"  {name} = {formatted}  {colorize(f'({type_info})', Colors.YELLOW)}")
     
     def list_functions(self):
-        """List all defined functions."""
+        """List all defined functions with their types."""
         functions = self.context.list_functions()
         if not functions:
             print("No functions defined.")
@@ -201,7 +264,44 @@ class Computor:
         
         print(colorize("Functions:", Colors.BOLD))
         for name, func in functions:
-            print(f"  {func}")
+            # Get polynomial degree info
+            degree = func.body.degree
+            if degree == 0:
+                degree_info = "constant"
+            elif degree == 1:
+                degree_info = "linear"
+            elif degree == 2:
+                degree_info = "quadratic"
+            elif degree == 3:
+                degree_info = "cubic"
+            else:
+                degree_info = f"degree {degree}"
+            print(f"  {func}  {colorize(f'({degree_info})', Colors.YELLOW)}")
+    
+    def _get_type_info(self, value) -> str:
+        """Get human-readable type information for a value."""
+        from src.math_types import Rational, Complex, Matrix, Polynomial, Function
+        
+        if isinstance(value, Rational):
+            if value.is_integer():
+                return "Integer"
+            return "Rational"
+        elif isinstance(value, Complex):
+            if value.is_real():
+                return "Real"
+            elif value.is_imaginary():
+                return "Imaginary"
+            return "Complex"
+        elif isinstance(value, Matrix):
+            return f"Matrix {value.rows}x{value.cols}"
+        elif isinstance(value, Polynomial):
+            if value.is_constant():
+                return "Constant"
+            return f"Polynomial (degree {value.degree})"
+        elif isinstance(value, Function):
+            return f"Function"
+        else:
+            return type(value).__name__
     
     def list_builtins(self):
         """List all built-in functions."""
@@ -223,14 +323,22 @@ class Computor:
         else:
             self.print_error(f"'{name}' not found")
     
-    def show_history(self):
+    def show_history(self, show_all=False):
         """Show command history."""
         if not self.history:
             print("No history.")
             return
         
-        print(colorize("History:", Colors.BOLD))
-        for i, cmd in enumerate(self.history[-20:], 1):
+        # Show last 20 commands from current session + loaded history
+        if show_all:
+            commands = self.history
+            print(colorize(f"Full History ({len(commands)} commands):", Colors.BOLD))
+        else:
+            commands = self.history[-20:]
+            print(colorize("Recent History:", Colors.BOLD))
+        
+        start_idx = len(self.history) - len(commands) + 1
+        for i, cmd in enumerate(commands, start_idx):
             print(f"  {i}. {cmd}")
     
     def print_error(self, message: str):
@@ -295,12 +403,14 @@ EQUATIONS (solve):
 
 COMMANDS:
   !help                 Show this help
-  !vars                 List variables
-  !funcs                List functions
+  !vars                 List variables (with types)
+  !funcs                List functions (with degree)
   !builtins             List built-in functions
+  !all                  List all (vars, funcs, builtins)
   !del <name>           Delete variable/function
   !clear                Clear all definitions
-  !history              Show command history
+  !history              Show recent history
+  !history all          Show full history
   !quit                 Exit program
 
 EXAMPLES:
